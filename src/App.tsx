@@ -87,6 +87,10 @@ import {
   Area,
   CartesianGrid
 } from 'recharts';
+import AuthScreen from './AuthScreen';
+import { getSupabaseClient } from './supabaseClient';
+import { exportComparativeStatementPDF } from './exportPdf';
+
 
 export const formatINR = (amount, compact = false) => {
   if (amount === undefined || amount === null || isNaN(amount)) return '₹0';
@@ -539,7 +543,7 @@ export default function App() {
 
   const [user, setUser] = useState(() => {
     const saved = localStorage.getItem('paisapulse_auth_user');
-    return saved ? JSON.parse(saved) : { id: 'usr_kolkata_9921', phone: '+919829012345', provider: 'demo' };
+    return saved ? JSON.parse(saved) : null;
   });
 
   const [profile, setProfile] = useState(() => {
@@ -554,6 +558,87 @@ export default function App() {
       ingest_token: 'pp_tok_live_8f3d1a92e4'
     };
   });
+
+  const handleLoginSuccess = (userData, profileData) => {
+    setUser(userData);
+    localStorage.setItem('paisapulse_auth_user', JSON.stringify(userData));
+
+    if (profileData) {
+      setProfile((prev) => {
+        const updated = { ...prev, ...profileData };
+        localStorage.setItem('paisapulse_user_profile', JSON.stringify(updated));
+        return updated;
+      });
+    }
+    showToast(`Welcome${profileData?.full_name ? `, ${profileData.full_name.split(' ')[0]}` : ''}!`);
+  };
+
+  const handleLogout = async () => {
+    localStorage.removeItem('paisapulse_auth_user');
+    setUser(null);
+    const sb = getSupabaseClient();
+    if (sb) {
+      try {
+        await sb.auth.signOut();
+      } catch (e) {
+        console.error('Sign out error:', e);
+      }
+    }
+    showToast('Logged out of PaisaPulse');
+  };
+
+  // Listen to Supabase Auth state changes
+  useEffect(() => {
+    const sb = getSupabaseClient();
+    if (!sb) return;
+
+    sb.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        const sbUser = {
+          id: session.user.id,
+          email: session.user.email,
+          phone: session.user.phone,
+          provider: session.user.app_metadata?.provider || 'supabase'
+        };
+        setUser(sbUser);
+        localStorage.setItem('paisapulse_auth_user', JSON.stringify(sbUser));
+
+        const meta = session.user.user_metadata;
+        if (meta?.full_name || meta?.name) {
+          setProfile((prev) => {
+            const updated = {
+              ...prev,
+              full_name: meta.full_name || meta.name,
+              phone: session.user.phone || prev.phone,
+              upi_id: meta.email ? `${meta.email.split('@')[0]}@okaxis` : prev.upi_id
+            };
+            localStorage.setItem('paisapulse_user_profile', JSON.stringify(updated));
+            return updated;
+          });
+        }
+      }
+    });
+
+    const { data: { subscription } } = sb.auth.onAuthStateChange((event, session) => {
+      if (session?.user) {
+        const sbUser = {
+          id: session.user.id,
+          email: session.user.email,
+          phone: session.user.phone,
+          provider: session.user.app_metadata?.provider || 'supabase'
+        };
+        setUser(sbUser);
+        localStorage.setItem('paisapulse_auth_user', JSON.stringify(sbUser));
+      } else if (event === 'SIGNED_OUT') {
+        setUser(null);
+        localStorage.removeItem('paisapulse_auth_user');
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [supabaseConfig]);
 
   const [accounts, setAccounts] = useState(() => {
     const saved = localStorage.getItem('paisapulse_accounts');
@@ -699,15 +784,52 @@ export default function App() {
     setActiveTab('home');
   };
 
+  if (!user) {
+    return (
+      <div className={darkMode ? 'dark' : ''}>
+        <AuthScreen
+          onLoginSuccess={handleLoginSuccess}
+          onOpenSupabaseConfig={() => setIsSupabaseModalOpen(true)}
+          supabaseConfig={supabaseConfig}
+          showToast={showToast}
+          darkMode={darkMode}
+          setDarkMode={setDarkMode}
+        />
+        {isSupabaseModalOpen && (
+          <SupabaseConfigModal
+            isOpen={isSupabaseModalOpen}
+            onClose={() => setIsSupabaseModalOpen(false)}
+            config={supabaseConfig}
+            onSave={(newCfg) => {
+              setSupabaseConfig(newCfg);
+              localStorage.setItem('paisapulse_sb_url', newCfg.url);
+              localStorage.setItem('paisapulse_sb_key', newCfg.anonKey);
+              showToast('Supabase settings saved!');
+              setIsSupabaseModalOpen(false);
+            }}
+          />
+        )}
+        {toastMessage && (
+          <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-xs font-semibold animate-bounce">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{toastMessage}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className={`min-h-screen ${darkMode ? 'dark bg-zinc-950 text-zinc-100' : 'bg-slate-50 text-slate-900'} font-sans antialiased selection:bg-teal-500 selection:text-white pb-24 transition-colors duration-200`}>
       {/* Top Header */}
       <header className="sticky top-0 z-40 backdrop-blur-md bg-white/80 dark:bg-zinc-900/80 border-b border-slate-200/80 dark:border-zinc-800/80 px-4 py-3 transition-colors">
         <div className="max-w-md mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2.5 cursor-pointer" onClick={() => setActiveTab('home')}>
-            <div className="w-9 h-9 rounded-2xl bg-gradient-to-tr from-teal-700 to-teal-500 flex items-center justify-center text-white shadow-md shadow-teal-500/20 font-black text-lg">
-              ₹
-            </div>
+            <img
+              src="/logo.png"
+              alt="PaisaPulse"
+              className="w-9 h-9 rounded-xl object-cover shadow-md shadow-teal-500/20 border border-slate-200/80 dark:border-zinc-800 shrink-0"
+            />
             <div>
               <div className="flex items-center gap-1.5">
                 <span className="font-bold text-base tracking-tight bg-gradient-to-r from-teal-700 to-teal-500 dark:from-teal-400 dark:to-emerald-400 bg-clip-text text-transparent">
@@ -754,6 +876,15 @@ export default function App() {
               aria-label="Toggle theme"
             >
               {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-700" />}
+            </button>
+
+            <button
+              onClick={handleLogout}
+              title="Log Out of PaisaPulse"
+              className="p-2 rounded-xl border border-slate-200 dark:border-zinc-800 text-slate-600 dark:text-zinc-300 hover:text-red-600 hover:border-red-300 dark:hover:border-red-900/60 dark:hover:text-red-400 transition-colors"
+              aria-label="Log Out"
+            >
+              <LogOut className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -857,6 +988,7 @@ export default function App() {
           <SettingsScreen
             profile={profile}
             user={user}
+            onLogout={handleLogout}
             supabaseConfig={supabaseConfig}
             onOpenSupabaseConfig={() => setIsSupabaseModalOpen(true)}
             transactions={transactions}
@@ -970,6 +1102,145 @@ export default function App() {
   );
 }
 
+function SwipeableAlertItem({ alert, onDismiss, onNavigateTab }) {
+  const [dragX, setDragX] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isDismissing, setIsDismissing] = useState(false);
+  const startXRef = useRef(0);
+
+  const handleTouchStart = (e) => {
+    startXRef.current = e.touches[0].clientX;
+    setIsDragging(true);
+  };
+
+  const handleTouchMove = (e) => {
+    if (!isDragging) return;
+    const diff = e.touches[0].clientX - startXRef.current;
+    if (diff > 0) {
+      setDragX(diff);
+    } else {
+      setDragX(0);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (!isDragging) return;
+    setIsDragging(false);
+    if (dragX > 70) {
+      setIsDismissing(true);
+      setTimeout(() => {
+        onDismiss(alert);
+      }, 200);
+    } else {
+      setDragX(0);
+    }
+  };
+
+  const handleMouseDown = (e) => {
+    if (e.button !== 0) return;
+    startXRef.current = e.clientX;
+    setIsDragging(true);
+  };
+
+  const handleMouseMove = (e) => {
+    if (!isDragging) return;
+    const diff = e.clientX - startXRef.current;
+    if (diff > 0) {
+      setDragX(diff);
+    } else {
+      setDragX(0);
+    }
+  };
+
+  const handleMouseUp = () => {
+    if (!isDragging) return;
+    setIsDragging(false);
+    if (dragX > 70) {
+      setIsDismissing(true);
+      setTimeout(() => {
+        onDismiss(alert);
+      }, 200);
+    } else {
+      setDragX(0);
+    }
+  };
+
+  return (
+    <div
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+      style={{
+        transform: isDismissing ? 'translateX(120%)' : `translateX(${dragX}px)`,
+        opacity: isDismissing ? 0 : Math.max(0.1, 1 - dragX / 220),
+        transition: isDragging ? 'none' : 'transform 0.22s ease-out, opacity 0.22s ease-out',
+        touchAction: 'pan-y'
+      }}
+      className={`p-3 rounded-2xl border flex items-center justify-between shadow-sm cursor-grab active:cursor-grabbing select-none transition-colors ${
+        alert.level === 'danger'
+          ? 'bg-red-50/90 dark:bg-red-950/40 border-red-200 dark:border-red-900/60 text-red-900 dark:text-red-200'
+          : 'bg-amber-50/90 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/60 text-amber-900 dark:text-amber-200'
+      }`}
+    >
+      <div className="flex items-center gap-2.5">
+        <div
+          className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+            alert.level === 'danger'
+              ? 'bg-red-100 text-red-600 dark:bg-red-900/80 dark:text-red-300'
+              : 'bg-amber-100 text-amber-700 dark:bg-amber-900/80 dark:text-amber-300'
+          }`}
+        >
+          {alert.level === 'danger' ? (
+            <AlertCircle className="w-4 h-4" />
+          ) : (
+            <AlertTriangle className="w-4 h-4" />
+          )}
+        </div>
+        <div>
+          <h4 className="text-xs font-bold leading-tight">
+            {alert.category} Budget Alert
+          </h4>
+          <p className="text-[11px] opacity-80 mt-0.5">{alert.message}</p>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5 shrink-0">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss(alert);
+            onNavigateTab('budgets');
+          }}
+          className="text-xs font-bold underline px-2 py-1 hover:opacity-80"
+        >
+          Review
+        </button>
+
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setIsDismissing(true);
+            setTimeout(() => {
+              onDismiss(alert);
+            }, 180);
+          }}
+          title="Dismiss Alert"
+          aria-label="Dismiss alert"
+          className="p-1 rounded-lg hover:bg-black/10 dark:hover:bg-white/10 transition-colors text-slate-500 hover:text-slate-800 dark:text-zinc-400 dark:hover:text-zinc-100 flex items-center justify-center"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function HomeView({
   profile,
   accounts,
@@ -986,8 +1257,27 @@ function HomeView({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [pullY, setPullY] = useState(0);
   const [touchStartY, setTouchStartY] = useState(0);
-  const [activeDonutIndex, setActiveDonutIndex] = useState(null);
   const [insightIndex, setInsightIndex] = useState(0);
+  const [activeDonutIndex, setActiveDonutIndex] = useState(null);
+
+  const [dismissedAlerts, setDismissedAlerts] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('paisapulse_dismissed_alerts') || '{}');
+    } catch {
+      return {};
+    }
+  });
+
+  const handleDismissAlert = (alert) => {
+    const updated = {
+      ...dismissedAlerts,
+      [alert.id]: { spent: alert.spent, limit: alert.limit },
+      [alert.category]: { spent: alert.spent, limit: alert.limit }
+    };
+    setDismissedAlerts(updated);
+    localStorage.setItem('paisapulse_dismissed_alerts', JSON.stringify(updated));
+    showToast(`${alert.category} alert dismissed`);
+  };
 
   const currentMonthTransactions = useMemo(() => {
     if (selectedMonth === 'empty') return [];
@@ -1048,11 +1338,19 @@ function HomeView({
   const budgetAlerts = useMemo(() => {
     const alerts = [];
     budgets.forEach(b => {
+      // Check if dismissed and value has NOT changed
+      const dismissed = dismissedAlerts[b.id] || dismissedAlerts[b.category];
+      if (dismissed && dismissed.spent === b.spent && dismissed.limit === b.limit) {
+        return;
+      }
+
       const pct = Math.round((b.spent / b.limit) * 100);
       if (pct > 100) {
         alerts.push({
           id: b.id,
           category: b.category,
+          spent: b.spent,
+          limit: b.limit,
           percent: pct,
           overAmount: b.spent - b.limit,
           level: 'danger',
@@ -1062,6 +1360,8 @@ function HomeView({
         alerts.push({
           id: b.id,
           category: b.category,
+          spent: b.spent,
+          limit: b.limit,
           percent: pct,
           leftAmount: b.limit - b.spent,
           level: 'warning',
@@ -1070,7 +1370,7 @@ function HomeView({
       }
     });
     return alerts;
-  }, [budgets]);
+  }, [budgets, dismissedAlerts]);
 
   const categoryData = useMemo(() => {
     const map = {};
@@ -1191,75 +1491,20 @@ function HomeView({
         </div>
       </div>
 
-      {/* AI Pulse Insights Card */}
-      <div className="bg-gradient-to-br from-teal-900 via-teal-800 to-slate-900 text-white rounded-3xl p-4 shadow-md relative overflow-hidden">
-        <div className="flex items-center justify-between pb-2 border-b border-teal-700/50">
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-lg bg-teal-500/30 flex items-center justify-center">
-              <Sparkles className="w-3.5 h-3.5 text-teal-300" />
-            </div>
-            <span className="text-xs font-black tracking-wide text-teal-200 uppercase">
-              AI Pulse • {INSIGHTS[insightIndex].title}
-            </span>
-          </div>
-          <button
-            onClick={cycleInsight}
-            title="Next Insight"
-            className="p-1 rounded-lg hover:bg-teal-700/50 text-teal-200 transition-colors flex items-center gap-1 text-[11px]"
-          >
-            <RefreshCw className="w-3 h-3" />
-            <span>Cycle</span>
-          </button>
-        </div>
-
-        <p className="text-xs text-slate-100 font-medium mt-2 leading-relaxed">
-          {INSIGHTS[insightIndex].text}
-        </p>
-
-        <div className="mt-2.5 bg-black/20 rounded-xl px-2.5 py-1.5 border border-white/10 flex items-center gap-2">
-          <Zap className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-          <p className="text-[11px] text-teal-100 font-normal truncate">
-            {INSIGHTS[insightIndex].tip}
-          </p>
-        </div>
-      </div>
-
-      {/* Threshold Budget Alerts Banner */}
+      {/* Threshold Budget Alerts Banner (Swipe right to dismiss) */}
       {budgetAlerts.length > 0 && selectedMonth !== 'empty' && (
         <div className="space-y-2">
           {budgetAlerts.slice(0, 2).map(alert => (
-            <div
+            <SwipeableAlertItem
               key={alert.id}
-              className={`p-3 rounded-2xl border flex items-center justify-between shadow-sm transition-all ${
-                alert.level === 'danger'
-                  ? 'bg-red-50/90 dark:bg-red-950/40 border-red-200 dark:border-red-900/60 text-red-900 dark:text-red-200'
-                  : 'bg-amber-50/90 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/60 text-amber-900 dark:text-amber-200'
-              }`}
-            >
-              <div className="flex items-center gap-2.5">
-                <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                  alert.level === 'danger'
-                    ? 'bg-red-100 text-red-600 dark:bg-red-900/80 dark:text-red-300'
-                    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/80 dark:text-amber-300'
-                }`}>
-                  {alert.level === 'danger' ? <AlertCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
-                </div>
-                <div>
-                  <h4 className="text-xs font-bold leading-tight">{alert.category} Budget Alert</h4>
-                  <p className="text-[11px] opacity-80 mt-0.5">{alert.message}</p>
-                </div>
-              </div>
-
-              <button
-                onClick={() => onNavigateTab('budgets')}
-                className="text-xs font-bold underline px-2 py-1 shrink-0"
-              >
-                Review
-              </button>
-            </div>
+              alert={alert}
+              onDismiss={handleDismissAlert}
+              onNavigateTab={onNavigateTab}
+            />
           ))}
         </div>
       )}
+
 
       {/* 6 Top KPI Cards */}
       <section className="space-y-2">
@@ -2387,8 +2632,25 @@ function BudgetsView({ budgets, setBudgets, transactions, profilePhone, showToas
   const handleExport = (format) => {
     showToast(`Generating ${format.toUpperCase()} Comparative Statement...`);
     setTimeout(() => {
+      if (format === 'pdf') {
+        try {
+          exportComparativeStatementPDF({
+            selectedMonth,
+            rangeMode,
+            comparativeData,
+            totals
+          });
+          showToast(`Exported PDF statement successfully!`);
+        } catch (err) {
+          console.error('PDF export failed:', err);
+          showToast('Failed to export PDF');
+        }
+        return;
+      }
+
+      // Excel / CSV Export
       const element = document.createElement('a');
-      const fileHeader = `PaisaPulse_Comparative_Statement_${selectedMonth}_${rangeMode}.${format === 'excel' ? 'csv' : 'txt'}`;
+      const fileHeader = `PaisaPulse_Comparative_Statement_${selectedMonth}_${rangeMode}.csv`;
       let content = `PAISAPULSE FINANCIAL REPORT\nPeriod: ${selectedMonth} (${rangeMode})\nGenerated: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\n`;
       content += `Category,Budget(INR),Actual(INR),Variance(INR),Variance%,Status\n`;
       comparativeData.forEach(r => {
@@ -2396,7 +2658,7 @@ function BudgetsView({ budgets, setBudgets, transactions, profilePhone, showToas
       });
       content += `TOTALS,${totals.totalBudget},${totals.totalActual},${totals.totalVariance},${totals.totalVariancePct}%,-\n`;
 
-      const file = new Blob([content], { type: format === 'excel' ? 'text/csv' : 'text/plain' });
+      const file = new Blob([content], { type: 'text/csv' });
       element.href = URL.createObjectURL(file);
       element.download = fileHeader;
       document.body.appendChild(element);
@@ -2404,8 +2666,9 @@ function BudgetsView({ budgets, setBudgets, transactions, profilePhone, showToas
       document.body.removeChild(element);
 
       showToast(`Exported ${fileHeader} successfully!`);
-    }, 700);
+    }, 500);
   };
+
 
   const handleCreateBudget = (e) => {
     e.preventDefault();
@@ -3907,6 +4170,8 @@ function TransactionsLedger({ transactions, setTransactions, onOpenCapture, onBa
 
 function SettingsScreen({
   profile,
+  user,
+  onLogout,
   supabaseConfig,
   onOpenSupabaseConfig,
   transactions,
@@ -4000,6 +4265,11 @@ function SettingsScreen({
             <h3 className="font-extrabold text-sm text-slate-900 dark:text-white">
               {profile?.full_name || 'Vikram Aditya'}
             </h3>
+            {user?.email || user?.phone ? (
+              <p className="text-xs text-slate-400">
+                Account: <span className="font-mono text-slate-600 dark:text-zinc-300 font-semibold">{user?.email || user?.phone}</span>
+              </p>
+            ) : null}
             <p className="text-xs text-slate-400">
               UPI: <span className="font-mono text-teal-600 dark:text-teal-400 font-bold">{profile?.upi_id || 'vikram@okhdfc'}</span>
             </p>
@@ -4113,7 +4383,25 @@ function SettingsScreen({
         </div>
       </div>
 
+      <div className="bg-white dark:bg-zinc-900 border border-slate-200/90 dark:border-zinc-800 rounded-3xl p-4 shadow-sm space-y-2.5">
+        <h3 className="font-bold text-xs uppercase tracking-wider text-slate-700 dark:text-zinc-200">
+          Account & Session
+        </h3>
+        <p className="text-[11px] text-slate-500">
+          Logged in as <strong className="text-slate-800 dark:text-zinc-200">{user?.email || user?.phone || profile?.full_name || 'Active Session'}</strong>
+          {user?.provider ? ` (${user.provider})` : ''}
+        </p>
+        <button
+          onClick={onLogout}
+          className="w-full py-2.5 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50/80 dark:bg-red-950/30 hover:bg-red-100 text-red-700 dark:text-red-300 font-bold text-xs shadow-sm flex items-center justify-center gap-1.5 transition-colors"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          <span>Log Out of PaisaPulse</span>
+        </button>
+      </div>
+
       <div className="bg-red-50/60 dark:bg-red-950/20 border border-red-200 dark:border-red-900/60 rounded-3xl p-4 shadow-sm space-y-2.5">
+
         <h3 className="font-bold text-xs uppercase tracking-wider text-red-700 dark:text-red-400">
           Danger Zone (GDPR Compliance)
         </h3>
